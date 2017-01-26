@@ -1,72 +1,89 @@
-// A list of Buffers with corresponding arrays of onset points
-OnsetBufList {
+// contains one recording, pos 0 and the last frame
+SimpleLoopBuf {
+	var <>in;
 	var <server;
 	var <>defBufLen;
-	var <obl;
-	var <oscresp;
+	var <buffer;
+	var <list;
 	var <synth;
 	var <isRecording = false;
 
-	*new {arg server, defBufLen=10;
-		^super.newCopyArgs(server, defBufLen).init;
+	*new {arg in=0, server, defBufLen=10;
+		^super.newCopyArgs(in, server, defBufLen).init;
 	}
 
 	init {
 		server ?? {server = Server.default};
-		obl = List.new;
 	}
 
-	rec {
+	rec {arg clock, quant;
 		if (isRecording) {
-			this.pr_freeResources;
+			synth.release;
 			isRecording = false;
-		}{
-			this.pr_startRec;
+		} {
+			if (clock.notNil) {
+				clock.play({
+					this.pr_startRec;
+				}, quant);
+			} {
+				this.pr_startRec;
+			};
 			isRecording = true;
 		}
 	}
 
-	// if no array is given one is created randomly
-	add {arg buf, arr, num=4;
-		if (arr.isNil) {
-			arr = Array.fill(4, {
-				rrand(0, buf.numFrames - server.sampleRate);
-			});
-		};
-		obl.add([buf, arr‚]);
-	}
-
-	at {arg ind=0;
-		^obl.clipAt(ind);
-	}
-
-	first {
-		^obl[0]
-	}
-
-	last {
-		^obl.last;
-	}
-
-	removeAt {
-
-	}
-
-	sizeAt {arg index=0;
-		^obl[1].at(index).size;
-	}
-
-	clear {
-		if (isRecording) {
-			this.pr_freeResources;
-		};
-		obl.do {arg i;
-			i[0].free;
-		};
-	}
-
 	free {
-		this.clear;
+		buffer.free;
+	}
+
+	pr_startRec {
+		var buf = Buffer.alloc(
+			server,
+			server.sampleRate * defBufLen,
+			2,
+			{arg bfr; synth = Synth('simple-buf-rec', ['buf', bfr, 'in', in, 'thr', 0.05])}
+		);
+		buffer = buf;
+		list = [0, nil];
+	}
+
+	*initClass {
+		ServerBoot.add({
+			SynthDef('simple-buf-rec', {arg buf, in=0, thr=0.05, gate=1;
+				var env, sig, amp, trig, phase;
+
+				env = EnvGen.ar(Env.asr(0.05), gate, doneAction:2); // global gate
+				sig = SoundIn.ar([in, in+1]) * gate;
+
+				phase = Phasor.ar(end:BufFrames.kr(buf));
+				BufWr.ar(sig, buf, phase, 0);
+			}).add;
+		});
+	}
+}
+
+OnsetBuf : SimpleLoopBuf {
+	var <oscresp;
+
+	pr_startRec {
+		var buf = Buffer.alloc(
+			server,
+			server.sampleRate * defBufLen,
+			2,
+			{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', in, 'thr', 0.05])}
+		);
+		this.pr_addOSC;
+		buffer = buf;
+		list = Array.new(20);
+	}
+
+	pr_addOSC {
+		oscresp = OSCFunc({arg msg;
+			if (msg[2] == 99) {
+				list = list.add(msg[3]);
+				msg.postln;
+			}
+		}, '\tr', server.addr);
 	}
 
 	pr_freeResources {
@@ -74,25 +91,9 @@ OnsetBufList {
 		oscresp.free;
 	}
 
-	//TODO: ADD AUDIO IN AND THR OPTIONS
-	pr_startRec {
-		var buf = Buffer.alloc(
-			server,
-			server.sampleRate * defBufLen,
-			2,
-			{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', 0, 'thr', 0.05])}
-		);
-		obl.add([buf, Array.new(20)]);
-		this.pr_addOSC;
-	}
-
-	// TODO: ADD ARGTEMPLATE TO MATCH ONLY ID 99
-	pr_addOSC {
-		var pointer = obl.indexOf(obl.last);
-		oscresp = OSCFunc({arg msg;
-			obl[pointer][1] = obl[pointer][1].add(msg[3]);
-			msg.postln;
-		}, '\tr', server.addr);
+	free {
+		buffer.free;
+		oscresp.free;
 	}
 
 	*initClass {
@@ -118,12 +119,76 @@ OnsetBufList {
 	}
 }
 
-// A player that plays, shuffles and bends one item from an OnsetBufList
+RandOnsetBuf : OnsetBuf {
+
+	// newUsing(buffer, numOnsets) adds a random list of onsets and the buffer
+}
+
+
+// just loop a simple loop buf and sync nicely
+SimpleLoopBufPlayer {
+	var <>defaultQuant; // TODO: MAKE SETTER THAT APPLIES THIS TO ALL RELEVANT PATTERNPROXIES
+	var <server;
+	var <obj;
+	var <durs;
+	var <player;
+	var <proxy;
+
+	*new  {arg defaultQuant=4, server;
+		^super.newCopyArgs(defaultQuant, server).init;
+	}
+
+	init {
+		server ?? {server = Server.default};
+		proxy = PbindProxy ('instrument', 'simpleplayer');
+	}
+
+	// give it an OnsetBuf
+	play {arg obj, clock, quant, amp=1.0;
+		var durs, dec;
+
+		clock = clock ?? {TempoClock.default};
+		quant = quant ?? {defaultQuant}; // if no quant argument is provided default is used
+		proxy.set(
+			'dur', defaultQuant,
+			'legato', 1,
+			'buf', obj.buffer,
+			'amp', amp
+		);
+		player = proxy.play(clock, quant:quant);
+	}
+
+	// Proxy stream goes on. Todo: make it start/stoppable at will (figure out how player works here)
+	stop {
+		player.stop;
+	}
+
+	// silence
+	hush {
+		proxy.set('amp', 0.0);
+	}
+
+	// TODO: IMPROVE DOUBLE TRIGGER LOOP OR WHAT?
+	*initClass {
+		ServerBoot.add({
+			// Unexpected results, unless recorded portions are longer than dur
+			SynthDef('simpleplayer', {arg buf, pos=0, gate=1, amp=1.0;
+				var env, sig, phase;
+				env = EnvGen.ar(Env.asr(0.01), gate, doneAction:2);
+				phase = Phasor.ar(start:pos, end:BufFrames.kr(buf));
+				sig = BufRd.ar(2, buf, phase, loop:0) * env * Lag.kr(amp);
+				Out.ar(0, sig);
+			}).add;
+		});
+	}
+}
+
+
+// A player that plays, shuffles and bends one OnsetBuf
 OnsetBufPlayer {
 	var <>defaultQuant; // TODO: MAKE SETTER THAT APPLIES THIS TO ALL RELEVANT PATTERNPROXIES
 	var <server;
-	var <buffer;
-	var <list;
+	var <obj;
 	var <durs;
 	var <>teiler=2;  // 1/teiler=dur
 	var <player;
@@ -138,18 +203,19 @@ OnsetBufPlayer {
 		proxy = PbindProxy ('instrument', 'grainplayer');
 	}
 
-	play {arg onsetbuf, amp=1.0, clock, quant;
+	// give it an OnsetBuf
+	play {arg obj, clock, quant, amp=1.0;
 		var durs, dec;
 
-		durs = Array.fill(onsetbuf[1].size, { 1/teiler});
+		durs = Array.fill(obj.list.size, { 1/teiler});
 		clock = clock ?? {TempoClock.default};
 		quant = quant ?? {defaultQuant}; // if no quant argument is provided default is used
 		dec = (clock.tempo * teiler).reciprocal; // actual seconds. Beware of tempo changes!!
 		proxy.set(
 			'dur', Pseq(durs, inf),
 			'dec', dec,
-			'pos', Pseq(onsetbuf[1], inf),
-			'buf', onsetbuf[0],
+			'pos', Pseq(obj.list, inf),
+			'buf', obj.buffer,
 			'amp', amp
 		);
 		player = proxy.play(clock, quant:quant);
@@ -177,7 +243,12 @@ OnsetBufPlayer {
 			};
 		});
 		proxy.at(\amp).quant = defaultQuant; // so the changes apply at next "bar"
-		proxy.at(\amp).source = arr; // set the source of PatternProxy
+		proxy.at(\amp).source = Pseq(arr, inf); // set the source of PatternProxy
+	}
+
+	set {arg key, val, quant;
+		quant ?? {proxy.at(key).quant = quant};
+		proxy.at(key).source = val;
 	}
 
 	// TODO: IMPROVE DOUBLE TRIGGER LOOP OR WHAT?
