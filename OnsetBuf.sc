@@ -68,6 +68,23 @@ OnsetBuf {
 		oscresp.free;
 	}
 
+	// reads a file into a buffer and analyzes it
+	read {arg path;
+		buffer = Buffer.read(
+			server,
+			Document.standardizePath(path),
+			action: {arg bf;
+				synth = Synth('offline-analyze', ['buf', bf, 'thr', 0.05]);
+				"analyzing buffer".postln;
+				this.pr_addOSC;
+				OSCFunc({
+					"done!".postln;
+					oscresp.free;
+				}, '/n_end', server.addr, nil, [synth.nodeID]).oneShot;
+		});
+
+	}
+
 	*initClass {
 		ServerBoot.add({
 			SynthDef('onset-buf-rec', {arg buf, in=0, thr=0.05, gate=1;
@@ -78,6 +95,20 @@ OnsetBuf {
 
 				phase = Phasor.ar(end:BufFrames.kr(buf));
 				BufWr.ar(sig, buf, phase, 0);
+
+				SendTrig.kr(
+					Coyote.kr(Mix.new(sig),
+						fastMul:0.6,
+						thresh:thr),
+					99,
+					phase
+				);
+			}).add;
+			SynthDef('offline-analyze', {arg buf, thr=0.05;
+				var sig, phase;
+
+				phase = Phasor.ar(end:BufFrames.kr(buf));
+				sig = FreeSelfWhenDone.kr(BufRd.ar(2, buf, phase, 0));
 
 				SendTrig.kr(
 					Coyote.kr(Mix.new(sig),
