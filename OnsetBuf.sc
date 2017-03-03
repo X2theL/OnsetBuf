@@ -39,14 +39,19 @@ OnsetBuf {
 	}
 
 	pr_startRec {
-		var buf = Buffer.alloc(
-			server,
-			server.sampleRate * defBufLen,
-			2,
-			{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', in, 'thr', 0.05])}
-		);
+		if (buffer.isNil) {
+			buffer = Buffer.alloc(
+				server,
+				server.sampleRate * defBufLen,
+				2,
+				{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', in, 'thr', 0.05])}
+			)
+		} {
+			if (list.size > 0) { list.clear };
+			synth = Synth('onset-buf-rec', ['buf', buffer, 'in', in, 'thr', 0.05]);
+		};
+
 		this.pr_addOSC;
-		buffer = buf;
 	}
 
 	pr_addOSC {
@@ -132,170 +137,6 @@ OnsetBuf {
 	}
 }
 
-
-// A player that plays, shuffles and bends one OnsetBuf
-OnsetBufPlayer {
-
-	var <obj; // todo: make nice setter for obj swap
-	var <>teiler;  // 1/teiler=dur. Default 16th notes
-	var <server;
-	var <out;
-	var <>numBars;
-	var <>defaultQuant;
-	var <durs;
-	var <amps;
-	var <globalAmp;
-	var <decays;
-	var <pos;
-	var <proxy;
-	var <pbinds; // one for simple one for grain playing. Can be swapped
-	var <group; // put the synths here for better control while playing
-
-
-	*new  {arg obj, type=\simple, teiler=4, numBars=1, defaultQuant=4, server, out=0;
-		^super.newCopyArgs(obj, teiler, server, out, numBars, defaultQuant).init(type);
-	}
-
-	init { arg tp, mp;
-		server ?? {server = Server.default};
-		group = Group.new;
-		amps = PatternProxy(Pseq(1.0.dup(obj.list.size), inf));
-		amps.quant = defaultQuant; // so the changes apply at next "bar"
-		globalAmp = PatternProxy(1.0);
-		durs = PatternProxy(1/teiler);
-		durs.quant = defaultQuant; // changes apply at next bar
-		pos = PatternProxy(Pseq(obj.list, inf));
-		decays = PatternProxy(0.1);
-		pbinds = (
-			simple: Pbind (
-				'instrument', 'simpleplayer',
-				'group', group,
-				'out', out,
-				'dur', defaultQuant * numBars,
-				'legato', 1,
-				'amp', globalAmp,
-				'buf', obj.buffer,
-				'dec', decays // will do nothing with simpleplayer
-			),
-			grain: Pbind (
-				'instrument', 'grainplayer',
-				'group', group,
-				'out', out,
-				'dur', durs,
-				'amp', amps * globalAmp,
-				'buf', obj.buffer,
-				'pos', pos,
-				'dec', decays
-			)
-		);
-
-		proxy = EventPatternProxy.new.quant_(defaultQuant);
-		this.swap(tp);
-	}
-
-	// change the Pbind (todo: make safer)
-	swap {arg type;
-		proxy.source = pbinds.at(type);
-	}
-
-	play {arg clock, quant=0;
-		clock = clock ?? {TempoClock.default};
-		proxy.play(clock, quant:quant);
-	}
-
-	stop {
-		proxy.stop;
-	}
-
-	// silence but keep rhythm?
-	hush {
-		globalAmp.source = 0.0;
-		group.set('amp', 0.0);
-	}
-
-	on {
-		globalAmp.source = 1.0;
-		group.set('amp', 1.0);
-	}
-
-	// make a rhythm. Only works if grain is playing
-	rh {arg numBeats ... args;
-		var arr;
-		args = ((args - 1) * teiler).asFloat;
-		arr = Array.fill(teiler * numBeats, {arg i;
-			if (args.includes(i.asFloat)) {
-				1.0
-			} {
-				0.0
-			};
-		});
-		this.setAmps(arr);
-		^arr; // return new array
-	}
-
-	// synchronise pos with amps to create sequence that repeats exactly
-	sync {
-		if (pos.source.list.size < amps.source.list.size) {
-			pos.source.list = pos.source.list.wrapExtend(amps.source.list.size);
-		} {
-			if (pos.source.list.size > amps.source.list.size) {
-				pos.source.list = pos.source.list.copyRange(0, amps.source.list.size -1);
-			}
-		}
-	}
-
-	// resets the pos array to original
-	unsync {
-		pos.source.list = obj.list;
-	}
-
-	// shuffles the pos array and returns the new array
-	shuf {
-		var arr = pos.source.list.scramble;
-		this.setPos(arr);
-		^arr;
-	}
-
-	setPos {arg arr;
-		pos.source = Pseq(arr, inf);
-	}
-
-	setAmps {arg arr;
-		amps.source = Pseq(arr, inf); // set the source of PatternProxy
-	}
-
-	dec {arg pat=0.1;
-		decays.source = pat;
-	}
-
-	free {
-		this.stop;
-		group.free;
-	}
-
-	*initClass {
-		ServerBoot.add({
-			// Unexpected results, unless recorded portions are longer than dur
-			SynthDef('simpleplayer', {arg buf, pos=0, gate=1, amp=1.0, out=0;
-				var env, sig, phase;
-				env = EnvGen.ar(Env.asr(0.01), gate, doneAction:2);
-				phase = Phasor.ar(start:pos, end:BufFrames.kr(buf));
-				sig = BufRd.ar(2, buf, phase, loop:0) * env * Lag.kr(amp);
-				Out.ar(out, sig);
-			}).add;
-
-			// grain player with auto release
-			SynthDef('grainplayer', {arg buf, pos=0, att=0.01, dec=0.3, amp=1.0, out=0;
-				var env, sig, phase;
-				env = EnvGen.ar(Env.perc(att, dec), 1, doneAction:2);
-				phase = Phasor.ar(start:pos, end:BufFrames.kr(buf));
-				sig = BufRd.ar(2, buf, phase, loop:0) * env * Lag.kr(amp);
-				Out.ar(out, sig);
-			}).add;
-		});
-	}
-}
-
 AbstractOBP {
 
 	var <>obj;
@@ -358,7 +199,7 @@ LoopOBP : AbstractOBP {
 				var env, sig, phase;
 				env = EnvGen.ar(Env.asr(0.01), gate, doneAction:2);
 				phase = Phasor.ar(start:pos, end:BufFrames.kr(buf));
-				sig = BufRd.ar(2, buf, phase, loop:0) * env * Lag.kr(amp);
+				sig = BufRd.ar(2, buf, phase, loop:0) * env * Lag.kr(amp, 0.04);
 				Out.ar(out, sig);
 			}).add;
 		})
