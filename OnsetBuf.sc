@@ -6,6 +6,7 @@ OnsetBuf {
 	var <buffer;
 	var <list;
 	var <synth;
+	var <>thr = 0.05;
 	var <oscresp;
 	var <isRecording = false;
 
@@ -18,60 +19,50 @@ OnsetBuf {
 		list = List.new(30);
 	}
 
-	rec {arg clock, quant=0;
+	rec {
 		if (isRecording.not) {
-			if (clock.notNil) {
-				clock.play({
-					this.pr_startRec;
-				}, quant);
+			if (buffer.isNil) {
+				buffer = Buffer.alloc(
+					server,
+					server.sampleRate * defBufLen,
+					2,
+					{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', in, 'thr', thr])}
+				)
 			} {
-				this.pr_startRec;
+				if (list.size > 0) { list.clear };
+				synth = Synth('onset-buf-rec', ['buf', buffer, 'in', in, 'thr', thr]);
 			};
+
+			this.pr_addOSC;
 			isRecording = true;
 		}
 	}
 
 	stopRec {
 		if (isRecording) {
-			this.pr_freeResources;
+			synth.release;
+			oscresp.free;
 			isRecording = false;
 		}
 	}
 
-	pr_startRec {
-		if (buffer.isNil) {
-			buffer = Buffer.alloc(
-				server,
-				server.sampleRate * defBufLen,
-				2,
-				{arg bfr; synth = Synth('onset-buf-rec', ['buf', bfr, 'in', in, 'thr', 0.05])}
-			)
-		} {
-			if (list.size > 0) { list.clear };
-			synth = Synth('onset-buf-rec', ['buf', buffer, 'in', in, 'thr', 0.05]);
-		};
-
-		this.pr_addOSC;
+	// return last n onset positions
+	getLast { arg num=1;
+		^list.copyRange(list.size - num, list.size - 1)
 	}
 
 	pr_addOSC {
 		oscresp = OSCFunc({arg msg;
-			if (msg[2] == 99) {
-				list.add(msg[3]);
-				msg.postln;
-			}
-		}, '\tr', server.addr);
-	}
-
-	pr_freeResources {
-		synth.release;
-		oscresp.free;
+			if ( list.last.notNil and: {msg[3] < list.last}) {list.clear}; // if buffer wraps clear list
+			list.add(msg[3]);
+			msg.postln;
+		}, '\tr', server.addr, nil, [synth.nodeID]);
 	}
 
 	free {
 		this.stopRec;
 		buffer.free;
-		oscresp.free;
+		list = nil;
 	}
 
 	// reads a file into a buffer and analyzes it
@@ -84,7 +75,7 @@ OnsetBuf {
 				"analyzing buffer".postln;
 				this.pr_addOSC;
 				OSCFunc({
-					"done!".postln;
+					"done analyzing!".postln;
 					oscresp.free;
 				}, '/n_end', server.addr, nil, [synth.nodeID]).oneShot;
 		});
@@ -123,15 +114,6 @@ OnsetBuf {
 					99,
 					phase
 				);
-			}).add;
-			SynthDef('simple-buf-rec', {arg buf, in=0, thr=0.05, gate=1;
-				var env, sig, amp, trig, phase;
-
-				env = EnvGen.ar(Env.asr(0.05), gate, doneAction:2); // global gate
-				sig = SoundIn.ar([in, in+1]) * gate;
-
-				phase = Phasor.ar(end:BufFrames.kr(buf));
-				BufWr.ar(sig, buf, phase, 0);
 			}).add;
 		});
 	}
